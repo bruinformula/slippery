@@ -62,14 +62,11 @@ int main(int argc, char **argv)
     if (prevFrame.empty()) return 0;
     cvtColor(prevFrame, prevGray, COLOR_BGR2GRAY);
 
-    VideoWriter writer("../output.mp4", VideoWriter::fourcc('M','P','4','V'), 30, prevFrame.size());
-    int frameNum = 0;
     while (true)
     {
         Mat frame, gray;
         capture >> frame;
         if (frame.empty()) break;
-        // if (frameNum < 1000) continue;
 
         cvtColor(frame, gray, COLOR_BGR2GRAY);
         
@@ -140,18 +137,15 @@ int main(int argc, char **argv)
             CV_RGB(0, 0, 0), //font color
             2);
 
-        namedWindow("Display frame", WINDOW_NORMAL); 
-        resizeWindow("Display frame", 1080/2, 1920/2); 
-        imshow("Display frame", frame);
+        // namedWindow("Display frame", WINDOW_NORMAL); 
+        // resizeWindow("Display frame", 1080/2, 1920/2); 
+        // imshow("Display frame", frame);
 
         // so we can step by frame
         // int key = waitKey(16);
         // if (key == 'q' || key == 27) break;
 
         prevGray = gray.clone();
-        writer.write(frame);
-        frameNum++;
-        cout<<frameNum<<" frames processed\n"<<endl;
     }
 
     return 0;
