@@ -1,3 +1,25 @@
+/**
+ * CURRENT CODE STATUS - VINAY
+ * Slip angle algorithm pretty much works as described in https://files.slack.com/files-pri/T01827RH821-F09253879JT/johnson2019.pdf
+ * Key differences:
+ * * No distortion removal
+ * * Instead of RANSAC or something sophisticated for outliers, I just take the median of slip angles for each feature
+ * * Just displays to user, no saving
+ * 
+ * What needs to be done:
+ * Slip angle doesn't work with current camera setup. The paper has the camera pointed directly down,
+ * whereas here it's angled up.
+ * -> This means depth must be taken into account, Owen says we should do a linear projection.
+ * 
+ * If we want to change the camera setup, we should point it directly downwards and angle it so the right/left direction
+ * is aligned with the direction the car is pointing.
+ * 
+ * Known issues:
+ * whatever i said above
+ * feature tracking doesn't work sometimes, tune parameters or something
+ * need to preprocess all the videos
+ */
+
 #include <iostream>
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
@@ -6,6 +28,7 @@
 #include <opencv2/video.hpp>
 using namespace cv;
 using namespace std;
+
 int main(int argc, char **argv)
 {
     const string about =
@@ -29,59 +52,101 @@ int main(int argc, char **argv)
         return 0;
     }
     VideoCapture capture(filename);
-    if (!capture.isOpened()){
-        //error in opening the video input
+    if (!capture.isOpened()) {
         cerr << "Unable to open file!" << endl;
         return 0;
     }
-    // Create some random colors
-    vector<Scalar> colors;
-    RNG rng;
-    for(int i = 0; i < 100; i++)
+
+    Mat prevFrame, prevGray;
+    capture >> prevFrame;
+    if (prevFrame.empty()) return 0;
+    cvtColor(prevFrame, prevGray, COLOR_BGR2GRAY);
+
+    while (true)
     {
-        int r = rng.uniform(0, 256);
-        int g = rng.uniform(0, 256);
-        int b = rng.uniform(0, 256);
-        colors.push_back(Scalar(r,g,b));
-    }
-    Mat old_frame, old_gray;
-    vector<Point2f> p0, p1;
-    // Take first frame and find corners in it
-    capture >> old_frame;
-    cvtColor(old_frame, old_gray, COLOR_BGR2GRAY);
-    goodFeaturesToTrack(old_gray, p0, 100, 0.3, 7, Mat(), 7, false, 0.04);
-    // Create a mask image for drawing purposes
-    Mat mask = Mat::zeros(old_frame.size(), old_frame.type());
-    while(true){
-        Mat frame, frame_gray;
+        Mat frame, gray;
         capture >> frame;
-        if (frame.empty())
-            break;
-        cvtColor(frame, frame_gray, COLOR_BGR2GRAY);
-        // calculate optical flow
+        if (frame.empty()) break;
+
+        cvtColor(frame, gray, COLOR_BGR2GRAY);
+        
+        // idk why I can't put this outside the loop
+        // masking out the top half, too much interference
+        // TODO: remove this once camera is properly mounted
+        bool MASKED = false;
+        Mat bottom_half_mask = Mat::zeros(frame.size(), CV_8UC1);
+        for (int i = bottom_half_mask.rows/2; i<bottom_half_mask.rows; i++)
+            for (int j = 0; j<bottom_half_mask.cols; j++)
+                bottom_half_mask.at<Vec3b>(i, j) = Vec3b(255, 255, 255);
+
+        // feature detection
+        // _currPts unused
+        vector<Point2f> prevPts, _currPts;
+        goodFeaturesToTrack(prevGray, prevPts, 300, 0.3, 7, MASKED ? bottom_half_mask : Mat(), 7, false, 0.04);
+        // goodFeaturesToTrack(gray,     _currPts, 300, MASKED ? 0.18 : 0.3, 7, MASKED ? bottom_half_mask : Mat(), 7, false, 0.04);
+
+        // optical flow w Lucas Kanade into new_points
+        vector<Point2f> new_points;
         vector<uchar> status;
         vector<float> err;
-        TermCriteria criteria = TermCriteria((TermCriteria::COUNT) + (TermCriteria::EPS), 10, 0.03);
-        calcOpticalFlowPyrLK(old_gray, frame_gray, p0, p1, status, err, Size(15,15), 2, criteria);
-        vector<Point2f> good_new;
-        for(uint i = 0; i < p0.size(); i++)
+
+        TermCriteria crit = TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, 20, 0.03);
+        calcOpticalFlowPyrLK(prevGray, gray,
+                             prevPts, new_points,
+                             status, err,
+                             Size(15,15), 3, crit);
+
+
+        // array representing dx, dy for each point
+        vector<Point2f> diffs;        
+        for (size_t i = 0; i < new_points.size(); i++)
         {
-            // Select good points
-            if(status[i] == 1) {
-                good_new.push_back(p1[i]);
-                // draw the tracks
-                line(mask,p1[i], p0[i], colors[i], 2);
-                circle(frame, p1[i], 5, colors[i], -1);
-            }
+            Point2f diff = (new_points[i] - prevPts[i]) * int(status[i]);
+            // cout << diff.x << ' ' << diff.y << ' ';
+            diffs.push_back(diff);
         }
-        Mat img;
-        add(frame, mask, img);
-        imshow("Frame", img);
-        int keyboard = waitKey(30);
-        if (keyboard == 'q' || keyboard == 27)
-            break;
-        // Now update the previous frame and previous points
-        old_gray = frame_gray.clone();
-        p0 = good_new;
+        
+        vector<float> slip_angles;
+        for (size_t i = 0; i < diffs.size(); i++)
+        {
+            Point2f d = diffs[i];
+            float slip_angle = atan2(d.y, d.x) * 180.0 / CV_PI;
+            slip_angles.push_back(slip_angle);
+        }
+        sort(slip_angles.begin(), slip_angles.end());
+        float median_slip_angle = slip_angles[slip_angles.size() / 2];
+        // draw and display stuff
+        for (size_t i = 0; i < prevPts.size(); i++)
+        {
+            if (!status[i]) continue;
+
+            Point2f p0 = prevPts[i];
+            Point2f p1 = new_points[i];
+
+            Scalar col = Scalar(0, 255, 0);
+
+            line(frame, p0, p1, col, 2);
+
+            circle(frame, p1, 4, col, -1);
+        }
+        putText(frame, //target image
+            format("%.2f", median_slip_angle), //text
+            cv::Point(10, frame.rows / 2), //top-left position
+            cv::FONT_HERSHEY_DUPLEX,
+            3.0,
+            CV_RGB(0, 0, 0), //font color
+            2);
+
+        // namedWindow("Display frame", WINDOW_NORMAL); 
+        // resizeWindow("Display frame", 1080/2, 1920/2); 
+        // imshow("Display frame", frame);
+
+        // so we can step by frame
+        // int key = waitKey(16);
+        // if (key == 'q' || key == 27) break;
+
+        prevGray = gray.clone();
     }
+
+    return 0;
 }
