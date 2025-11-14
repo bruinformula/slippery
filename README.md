@@ -26,6 +26,12 @@ cmake ..
 cmake --build .
 ```
 
+4. Run the project:
+
+```bash
+/path/to/slip-angle /path/to/original.mp4 /path/to/output.avi
+```
+
 ## Advanced Options
 
 - To use a system-installed OpenCV, pass `-DBUILD_OPENCV=OFF` and specify the OpenCV directory if needed:

@@ -4,7 +4,7 @@
  * Key differences:
  * * No distortion removal
  * * Instead of RANSAC or something sophisticated for outliers, I just take the median of slip angles for each feature
- * * Just displays to user, no saving
+ * * Saves to output video with drawn features and slip angle
  * 
  * What needs to be done:
  * Slip angle doesn't work with current camera setup. The paper has the camera pointed directly down,
@@ -14,10 +14,11 @@
  * If we want to change the camera setup, we should point it directly downwards and angle it so the right/left direction
  * is aligned with the direction the car is pointing.
  * 
- * Known issues:
- * whatever i said above
+ * Other issues:
  * feature tracking doesn't work sometimes, tune parameters or something
- * need to preprocess all the videos
+ * fix output to be in mp4 format
+ * Random !filename_pattern.empty() error, doesn't seem to do anything though
+ * Videos should to be put in some kind of preprocessing pipeline w/ffmpeg
  */
 
 #include <iostream>
@@ -26,127 +27,135 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 #include <opencv2/video.hpp>
-using namespace cv;
-using namespace std;
 
 int main(int argc, char **argv)
 {
-    const string about =
-        "This sample demonstrates Lucas-Kanade Optical Flow calculation.\n"
-        "The example file can be downloaded from:\n"
-        "  https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4";
-    const string keys =
+    const std::string about =
+        "This code performs slip angle calculation using Lucas Kanade Optical Flow and feature detection.\n"
+        "Test videos at Box/BFR/MK11/11 Software/slip_angle_tests\n"
+        "Based primarily on https://files.slack.com/files-pri/T01827RH821-F09253879JT/johnson2019.pdf";
+    const std::string keys =
         "{ h help |      | print this help message }"
-        "{ @image | vtest.avi | path to image file }";
-    CommandLineParser parser(argc, argv, keys);
+        "{ @video_in | original.mp4 | path to video input (mp4, mov should probably work. avi should definitely work) }"
+        "{ @video_out | output.avi | path to video output (avi format) }";
+    cv::CommandLineParser parser(argc, argv, keys);
     parser.about(about);
     if (parser.has("help"))
     {
         parser.printMessage();
         return 0;
     }
-    string filename = samples::findFile(parser.get<string>("@image"));
+    std::string filename_in = cv::samples::findFile(parser.get<std::string>("@video_in"));
+    std::string filename_out = parser.get<std::string>("@video_out");
     if (!parser.check())
     {
         parser.printErrors();
         return 0;
     }
-    VideoCapture capture(filename);
+    cv::VideoCapture capture(filename_in);
     if (!capture.isOpened()) {
-        cerr << "Unable to open file!" << endl;
+        std::cerr << "Unable to open file!" << std::endl;
         return 0;
     }
 
-    Mat prevFrame, prevGray;
+    cv::Mat prevFrame, prevGray;
     capture >> prevFrame;
     if (prevFrame.empty()) return 0;
-    cvtColor(prevFrame, prevGray, COLOR_BGR2GRAY);
+    cv::cvtColor(prevFrame, prevGray, cv::COLOR_BGR2GRAY);
+
+    double FPS = capture.get(cv::CAP_PROP_FPS);
+    int FRAME_COUNT = capture.get(cv::CAP_PROP_FRAME_COUNT);
+    // codec can be changed, idrc
+    cv::VideoWriter writer(filename_out, cv::VideoWriter::fourcc('M','J','P','G'), FPS, prevFrame.size(), true);
+    int frameNum = 0;
+    
+    // Option: turn this on to mask out the top half to decrease interference
+    // Remove this once camera is properly mounted
+    bool MASKED = false;
+    cv::Mat bottom_half_mask = cv::Mat::zeros(prevFrame.size(), CV_8UC1);
+    for (int i = bottom_half_mask.rows/2; i<bottom_half_mask.rows; i++)
+        for (int j = 0; j<bottom_half_mask.cols; j++)
+            bottom_half_mask.at<uchar>(i, j) = 255;
 
     while (true)
     {
-        Mat frame, gray;
+        cv::Mat frame, gray;
         capture >> frame;
         if (frame.empty()) break;
 
-        cvtColor(frame, gray, COLOR_BGR2GRAY);
-        
-        // idk why I can't put this outside the loop
-        // masking out the top half, too much interference
-        // TODO: remove this once camera is properly mounted
-        bool MASKED = false;
-        Mat bottom_half_mask = Mat::zeros(frame.size(), CV_8UC1);
-        for (int i = bottom_half_mask.rows/2; i<bottom_half_mask.rows; i++)
-            for (int j = 0; j<bottom_half_mask.cols; j++)
-                bottom_half_mask.at<Vec3b>(i, j) = Vec3b(255, 255, 255);
+        cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
 
-        // feature detection
-        // _currPts unused
-        vector<Point2f> prevPts, _currPts;
-        goodFeaturesToTrack(prevGray, prevPts, 300, 0.3, 7, MASKED ? bottom_half_mask : Mat(), 7, false, 0.04);
-        // goodFeaturesToTrack(gray,     _currPts, 300, MASKED ? 0.18 : 0.3, 7, MASKED ? bottom_half_mask : Mat(), 7, false, 0.04);
+        // feature detection, uses some eigenvalue thing
+        std::vector<cv::Point2f> prevPts;
+        cv::goodFeaturesToTrack(prevGray, prevPts, 300, 0.3, 7, MASKED ? bottom_half_mask : cv::Mat(), 7, false, 0.04);
 
-        // optical flow w Lucas Kanade into new_points
-        vector<Point2f> new_points;
-        vector<uchar> status;
-        vector<float> err;
+        // optical flow with Lucas Kanade into new_points
+        std::vector<cv::Point2f> new_points;
+        std::vector<uchar> status;
+        std::vector<float> err;
 
-        TermCriteria crit = TermCriteria(TermCriteria::COUNT + TermCriteria::EPS, 20, 0.03);
-        calcOpticalFlowPyrLK(prevGray, gray,
+        cv::TermCriteria crit = cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 20, 0.03);
+        cv::calcOpticalFlowPyrLK(prevGray, gray,
                              prevPts, new_points,
                              status, err,
-                             Size(15,15), 3, crit);
+                             cv::Size(15,15), 3, crit);
 
 
         // array representing dx, dy for each point
-        vector<Point2f> diffs;        
+        std::vector<cv::Point2f> diffs;        
         for (size_t i = 0; i < new_points.size(); i++)
         {
-            Point2f diff = (new_points[i] - prevPts[i]) * int(status[i]);
-            // cout << diff.x << ' ' << diff.y << ' ';
+            cv::Point2f diff = (new_points[i] - prevPts[i]) * int(status[i]);
             diffs.push_back(diff);
         }
-        
-        vector<float> slip_angles;
+
+        std::vector<float> slip_angles;
         for (size_t i = 0; i < diffs.size(); i++)
         {
-            Point2f d = diffs[i];
+            cv::Point2f d = diffs[i];
             float slip_angle = atan2(d.y, d.x) * 180.0 / CV_PI;
             slip_angles.push_back(slip_angle);
         }
-        sort(slip_angles.begin(), slip_angles.end());
+        std::sort(slip_angles.begin(), slip_angles.end());
+        // BOOM!
         float median_slip_angle = slip_angles[slip_angles.size() / 2];
+
         // draw and display stuff
         for (size_t i = 0; i < prevPts.size(); i++)
         {
             if (!status[i]) continue;
 
-            Point2f p0 = prevPts[i];
-            Point2f p1 = new_points[i];
+            cv::Point2f p0 = prevPts[i];
+            cv::Point2f p1 = new_points[i];
 
-            Scalar col = Scalar(0, 255, 0);
+            cv::Scalar col = cv::Scalar(0, 255, 0);
 
-            line(frame, p0, p1, col, 2);
+            cv::line(frame, p0, p1, col, 2);
 
-            circle(frame, p1, 4, col, -1);
+            cv::circle(frame, p1, 4, col, -1);
         }
-        putText(frame, //target image
-            format("%.2f", median_slip_angle), //text
-            cv::Point(10, frame.rows / 2), //top-left position
+
+        // display median slip angle on frame
+        cv::putText(frame,
+            cv::format("%.2f", median_slip_angle),
+            cv::Point(10, frame.rows / 2),
             cv::FONT_HERSHEY_DUPLEX,
             3.0,
-            CV_RGB(0, 0, 0), //font color
+            CV_RGB(0, 0, 0),
             2);
 
-        // namedWindow("Display frame", WINDOW_NORMAL); 
-        // resizeWindow("Display frame", 1080/2, 1920/2); 
-        // imshow("Display frame", frame);
-
-        // so we can step by frame
-        // int key = waitKey(16);
+        // legacy frame stepping code
+        // int key = waitKey(0);
         // if (key == 'q' || key == 27) break;
 
         prevGray = gray.clone();
+        writer.write(frame);
+        frameNum++;
+        if (frameNum % 100 == 0) {
+            std::cout << frameNum << "/" << FRAME_COUNT << " frames processed" << std::endl;
+        }
     }
+    writer.release();
 
     return 0;
 }
