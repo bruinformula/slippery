@@ -19,17 +19,23 @@
  * fix output to be in mp4 format
  * Random !filename_pattern.empty() error, doesn't seem to do anything though
  * Videos should to be put in some kind of preprocessing pipeline w/ffmpeg
+ * 
+ * 1. tes tdiff optical flow algorithms
+ * 
+ * 2. also output stuff to graphs, plot slip angle over time
+ * get statistics on how long it takes to process each frame, stdev, mean, median, etc.
  */
 
 #include <iostream>
+#include <fstream>
+#include <chrono>
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 #include <opencv2/video.hpp>
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     const std::string about =
         "This code performs slip angle calculation using Lucas Kanade Optical Flow and feature detection.\n"
         "Test videos at Box/BFR/MK11/11 Software/slip_angle_tests\n"
@@ -37,7 +43,8 @@ int main(int argc, char **argv)
     const std::string keys =
         "{ h help |      | print this help message }"
         "{ @video_in | original.mp4 | path to video input (mp4, mov should probably work. avi should definitely work) }"
-        "{ @video_out | output.avi | path to video output (avi format) }";
+        "{ @video_out | output.avi | path to video output (avi format) }"
+        "{ stats_file | | path to optional stats output (csv format) }";
     cv::CommandLineParser parser(argc, argv, keys);
     parser.about(about);
     if (parser.has("help"))
@@ -47,8 +54,13 @@ int main(int argc, char **argv)
     }
     std::string filename_in = cv::samples::findFile(parser.get<std::string>("@video_in"));
     std::string filename_out = parser.get<std::string>("@video_out");
-    if (!parser.check())
-    {
+    bool stats_enabled = parser.has("stats_file");
+    std::string filename_stats;
+    if (stats_enabled) {
+        std::cout << parser.get<std::string>("stats_file") << std::endl;
+        filename_stats = parser.get<std::string>("stats_file");
+    }
+    if (!parser.check()) {
         parser.printErrors();
         return 0;
     }
@@ -77,8 +89,14 @@ int main(int argc, char **argv)
         for (int j = 0; j<bottom_half_mask.cols; j++)
             bottom_half_mask.at<uchar>(i, j) = 255;
 
-    while (true)
-    {
+    std::vector<double> slip_angles_over_time;
+    std::vector<double> times_over_time;
+
+    auto start = std::chrono::system_clock::now();
+    while (true) {
+        auto frame_start = std::chrono::system_clock::now();
+        times_over_time.push_back(std::chrono::duration<double>(frame_start - start).count());
+
         cv::Mat frame, gray;
         capture >> frame;
         if (frame.empty()) break;
@@ -109,16 +127,17 @@ int main(int argc, char **argv)
             diffs.push_back(diff);
         }
 
-        std::vector<float> slip_angles;
+        std::vector<double> slip_angles;
         for (size_t i = 0; i < diffs.size(); i++)
         {
             cv::Point2f d = diffs[i];
-            float slip_angle = atan2(d.y, d.x) * 180.0 / CV_PI;
+            double slip_angle = atan2(d.y, d.x) * 180.0 / CV_PI;
             slip_angles.push_back(slip_angle);
         }
         std::sort(slip_angles.begin(), slip_angles.end());
         // BOOM!
-        float median_slip_angle = slip_angles[slip_angles.size() / 2];
+        double median_slip_angle = slip_angles[slip_angles.size() / 2];
+        slip_angles_over_time.push_back(median_slip_angle);
 
         // draw and display stuff
         for (size_t i = 0; i < prevPts.size(); i++)
@@ -156,6 +175,16 @@ int main(int argc, char **argv)
         }
     }
     writer.release();
+
+    std::cout << filename_stats << std::endl;
+    if (stats_enabled) {
+        std::ofstream stats_out(filename_stats);
+        stats_out << "Frame, Angle (deg), Time (s)" << std::endl;
+        for (size_t i = 0; i < FRAME_COUNT; i++) {
+            stats_out << i << "," << slip_angles_over_time.at(i) << "," << times_over_time.at(i) << std::endl;
+        }
+        stats_out.close();
+    }
 
     return 0;
 }
