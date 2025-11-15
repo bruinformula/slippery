@@ -4,7 +4,7 @@ Quick script to visualize slip angle and processing time statistics from stats.c
 import numpy as np
 import matplotlib.pyplot as plt
 
-data = np.loadtxt("../stats.csv", delimiter=",", skiprows=1)
+data = np.loadtxt("./stats.csv", delimiter=",", skiprows=1)
 
 frames = data[:, 0]
 angles = data[:, 1]
