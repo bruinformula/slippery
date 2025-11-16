@@ -30,12 +30,13 @@
 #include <fstream>
 #include <chrono>
 #include <opencv2/core.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
-#include <opencv2/videoio.hpp>
-#include <opencv2/video.hpp>
+
+#include "Slippery/Slippery.hpp"
+
+using namespace Slip; // usage acceptable b/c out namespace
 
 int main(int argc, char **argv) {
+
     const std::string about =
         "This code performs slip angle calculation using Lucas Kanade Optical Flow and feature detection.\n"
         "Test videos at Box/BFR/MK11/11 Software/slip_angle_tests\n"
@@ -56,6 +57,7 @@ int main(int argc, char **argv) {
     std::string filename_out = parser.get<std::string>("@video_out");
     bool stats_enabled = parser.has("stats_file");
     std::string filename_stats;
+
     if (stats_enabled) {
         std::cout << parser.get<std::string>("stats_file") << std::endl;
         filename_stats = parser.get<std::string>("stats_file");
@@ -70,118 +72,33 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    cv::Mat prevFrame, prevGray;
-    capture >> prevFrame;
-    if (prevFrame.empty()) return 0;
-    cv::cvtColor(prevFrame, prevGray, cv::COLOR_BGR2GRAY);
 
-    double FPS = capture.get(cv::CAP_PROP_FPS);
-    int FRAME_COUNT = capture.get(cv::CAP_PROP_FRAME_COUNT);
-    // codec can be changed, idrc
-    cv::VideoWriter writer(filename_out, cv::VideoWriter::fourcc('M','J','P','G'), FPS, prevFrame.size(), true);
-    int frameNum = 0;
-    
-    // Option: turn this on to mask out the top half to decrease interference
-    // Remove this once camera is properly mounted
-    bool MASKED = false;
-    cv::Mat bottom_half_mask = cv::Mat::zeros(prevFrame.size(), CV_8UC1);
-    for (int i = bottom_half_mask.rows/2; i<bottom_half_mask.rows; i++)
-        for (int j = 0; j<bottom_half_mask.cols; j++)
-            bottom_half_mask.at<uchar>(i, j) = 255;
+    auto optional_flow = OpticalFlow::configure(filename_in, filename_out);
 
-    std::vector<double> slip_angles_over_time;
-    std::vector<double> times_over_time;
-
-    auto start = std::chrono::system_clock::now();
-    while (true) {
-        auto frame_start = std::chrono::system_clock::now();
-        times_over_time.push_back(std::chrono::duration<double>(frame_start - start).count());
-
-        cv::Mat frame, gray;
-        capture >> frame;
-        if (frame.empty()) break;
-
-        cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-
-        // feature detection, uses some eigenvalue thing
-        std::vector<cv::Point2f> prevPts;
-        cv::goodFeaturesToTrack(prevGray, prevPts, 300, 0.3, 7, MASKED ? bottom_half_mask : cv::Mat(), 7, false, 0.04);
-
-        // optical flow with Lucas Kanade into new_points
-        std::vector<cv::Point2f> new_points;
-        std::vector<uchar> status;
-        std::vector<float> err;
-
-        cv::TermCriteria crit = cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 20, 0.03);
-        cv::calcOpticalFlowPyrLK(prevGray, gray,
-                             prevPts, new_points,
-                             status, err,
-                             cv::Size(15,15), 3, crit);
-
-
-        // array representing dx, dy for each point
-        std::vector<cv::Point2f> diffs;        
-        for (size_t i = 0; i < new_points.size(); i++)
-        {
-            cv::Point2f diff = (new_points[i] - prevPts[i]) * int(status[i]);
-            diffs.push_back(diff);
-        }
-
-        std::vector<double> slip_angles;
-        for (size_t i = 0; i < diffs.size(); i++)
-        {
-            cv::Point2f d = diffs[i];
-            double slip_angle = atan2(d.y, d.x) * 180.0 / CV_PI;
-            slip_angles.push_back(slip_angle);
-        }
-        std::sort(slip_angles.begin(), slip_angles.end());
-        // BOOM!
-        double median_slip_angle = slip_angles[slip_angles.size() / 2];
-        slip_angles_over_time.push_back(median_slip_angle);
-
-        // draw and display stuff
-        for (size_t i = 0; i < prevPts.size(); i++)
-        {
-            if (!status[i]) continue;
-
-            cv::Point2f p0 = prevPts[i];
-            cv::Point2f p1 = new_points[i];
-
-            cv::Scalar col = cv::Scalar(0, 255, 0);
-
-            cv::line(frame, p0, p1, col, 2);
-
-            cv::circle(frame, p1, 4, col, -1);
-        }
-
-        // display median slip angle on frame
-        cv::putText(frame,
-            cv::format("%.2f", median_slip_angle),
-            cv::Point(10, frame.rows / 2),
-            cv::FONT_HERSHEY_DUPLEX,
-            3.0,
-            CV_RGB(0, 0, 0),
-            2);
-
-        // legacy frame stepping code
-        // int key = waitKey(0);
-        // if (key == 'q' || key == 27) break;
-
-        prevGray = gray.clone();
-        writer.write(frame);
-        frameNum++;
-        if (frameNum % 100 == 0) {
-            std::cout << frameNum << "/" << FRAME_COUNT << " frames processed" << std::endl;
-        }
+    if (!optional_flow) {
+        std::cerr << "Flow failed to initialize\n" << std::endl;
+        return 1;
     }
-    writer.release();
+
+    OpticalFlow flow = std::move(*optional_flow);
+
+    bool is_done = false;
+
+    while (!is_done) {
+        is_done = flow.step();
+    } 
+
+    flow.writer.release();
 
     std::cout << filename_stats << std::endl;
     if (stats_enabled) {
         std::ofstream stats_out(filename_stats);
         stats_out << "Frame, Angle (deg), Time (s)" << std::endl;
+
+        int FRAME_COUNT = capture.get(cv::CAP_PROP_FRAME_COUNT);
+
         for (size_t i = 0; i < FRAME_COUNT; i++) {
-            stats_out << i << "," << slip_angles_over_time.at(i) << "," << times_over_time.at(i) << std::endl;
+            stats_out << i << "," << flow.samples.at(i).angle << "," << flow.samples.at(i).time << std::endl;
         }
         stats_out.close();
     }

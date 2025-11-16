@@ -1,0 +1,15 @@
+{
+    "configurations": [
+        {
+            "name": "MacOS",
+            "includePath": [
+                "${workspaceFolder}/include/**",
+                "/usr/local/include",
+                "/opt/homebrew/Cellar/opencv/**/include/**"
+            ],
+            "intelliSenseMode": "${default}"
+        }
+
+    ],
+    "version": 4
+}
